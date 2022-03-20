@@ -1,14 +1,27 @@
 // create a pool instance
 
 const { ethers } = require("ethers");
-const { Pool, TickListDataProvider, Tick} = require("@uniswap/v3-sdk");
-const { Token } = require("@uniswap/sdk-core");
-const UniswapV3Pool = require("@uniswap/v3-core/artifacts/contracts/interfaces/IUniswapV3Pool.sol/IUniswapV3Pool.json")
+const { Pool, TickListDataProvider, Tick, Trade, Route, priceToClosestTick, Position} = require("@uniswap/v3-sdk");
+const { Token, CurrencyAmount, Percent, Price} = require("@uniswap/sdk-core");
+const UniswapV3Pool = require("@uniswap/v3-core/artifacts/contracts/interfaces/IUniswapV3Pool.sol/IUniswapV3Pool.json");
+const UniswapV3Router = require("@uniswap/v3-periphery/artifacts/contracts/interfaces/ISwapRouter.sol/ISwapRouter.json");
+const UniswapPositionManager = require("@uniswap/v3-periphery/artifacts/contracts/interfaces/INonfungiblePositionManager.sol/INonfungiblePositionManager.json");
 
 const provider = new ethers.providers.JsonRpcProvider("https://mainnet.infura.io/v3/752fd90faa1a42eaa668ce9ae05b8ff5");
+const signer = new ethers.Wallet.createRandom(); // just for testing
+const account = signer.connect(provider);
 
 const poolAddress = "0x8ad599c3A0ff1De082011EFDDc58f1908eb6e6D8";
 const poolContract = new ethers.Contract(poolAddress, UniswapV3Pool.abi, provider);
+
+const routerAddress = "0xE592427A0AEce92De3Edee1F18E0157C05861564";
+const routerContract = new ethers.Contract(routerAddress, UniswapV3Router.abi, provider);
+const uniswapRouter = routerContract.connect(account);
+
+
+const positionManagerAddress = "0xC36442b4a4522E871399CD717aBDD847Ab11FE88";
+const positionManagerContract = new ethers.Contract(positionManagerAddress, UniswapPositionManager.abi, provider)
+const uniswapPositionManager = positionManagerContract.connect(account);
 
 async function main() {
 
@@ -64,6 +77,86 @@ async function main() {
     );
 
     console.log(pool);
+
+    // Swap ETH for USDC
+    const deadline = Math.floor(Date.now() / 1000) + 60 * 20;
+    const amountIn = CurrencyAmount.fromRawAmount(token0, "5000000000");
+    const route = new Route([pool], token0, token1);
+
+    console.log(`1 USDC can be swapped for ${route.midPrice.toSignificant(6)} WETH`);
+    console.log(`1 WETH can be swapped for ${route.midPrice.invert().toSignificant(6)} USDC`);
+
+    const trade = await Trade.exactIn(route, amountIn);
+
+    console.log(`The execution price of this trade is ${trade.executionPrice.toSignificant(6)}`);
+
+    const slippageTolerance = new Percent('50', '10000'); // => 0.05% => 1 bip = 0.001
+    const amountOutMinimum = trade.minimumAmountOut(slippageTolerance);
+    console.log(`For 5000 USDC you can get a minimum of ${amountOutMinimum.toSignificant(6)} WETH`);
+
+
+    /*
+    const swapParams = {
+        path: Buffer.from([usdcAddress, wethAddress]),
+        recipient: signer.address,
+        deadline,
+        amountIn: ethers.utils.parseUnits(amountIn.toExact(), 6),
+        amountOutMinimum: ethers.utils.parseUnits(amountOutMinimum.toExact(), 18),
+    }
+
+    const swapTx = uniswapRouter.exactInput(
+        swapParams,
+        { value: value, gasPrice: 20e9}
+    )
+
+    console.log(`Swap transaction hash: ${swapTx.hash}`)
+    const swapReceipt = await swapTx.wait()
+    console.log(`Swap Transaction receipt: ${swapReceipt}`)
+    */
+
+    // adding liquidity of 5 ETH within the 1500-3000 USDC/WETH price range
+    const lowerPrice = CurrencyAmount.fromRawAmount(token0, "1500000000");
+    const upperPrice = CurrencyAmount.fromRawAmount(token0, "3000000000");
+
+    const lowerPriceTick = priceToClosestTick(new Price(token1, token0, lowerPrice.numerator, lowerPrice.denominator));
+    const upperPriceTick = priceToClosestTick(new Price(token1, token0, upperPrice.numerator, upperPrice.denominator));
+
+    const lowerTickSpacing = Math.floor(lowerPriceTick / tickSpacing) * tickSpacing
+    const upperTickSpacing = Math.floor(upperPriceTick / tickSpacing) * tickSpacing
+
+    console.log(`To provide liquidity for the 1500-3000 USDC/WETH range, you need to create a position between ${lowerTickSpacing} and ${upperTickSpacing} ticks`);
+
+    const position = new Position({
+        pool,
+        liquidity: ethers.utils.parseEther("5.0"),
+        tickLower: lowerTickSpacing,
+        tickUpper: upperTickSpacing
+    })
+
+    const mintAmounts = position.mintAmounts;
+
+    const mintParams = {
+        token0: usdcAddress,
+        token1: wethAddress,
+        fee: pool.fee,
+        tickLower: lowerTickSpacing,
+        tickUpper: upperTickSpacing,
+        amount0Desired: mintAmounts.amount0.toString(),
+        amount1Desired: mintAmounts.amount1.toString(),
+        amount0Min: mintAmounts.amount0.toString(),
+        amount1Min: mintAmounts.amount1.toString(),
+        recipient: signer.address,
+        deadline
+    }
+
+    /* For immplementing Uniswap
+
+    const minTx = await uniswapPositionManager.mint(
+        mintParams,
+        { value, gasPrice: 20e9 }
+    )
+     */
+
 }
 
 main().catch(e => console.log(e));
